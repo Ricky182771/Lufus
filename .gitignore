@@ -1,0 +1,13 @@
+build/
+*.o
+*.so
+*.a
+.vscode/
+.idea/
+*.user
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+out.txt
+*.autosave

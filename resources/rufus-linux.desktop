@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Rufus Linux
+GenericName=Bootable USB Creator
+Comment=Create bootable USB drives from ISO images
+Exec=rufus-linux
+Icon=drive-removable-media
+Terminal=false
+Type=Application
+Categories=System;Utility;
+Keywords=USB;bootable;ISO;flash;

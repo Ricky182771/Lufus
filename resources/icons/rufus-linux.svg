@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="256" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#89b4fa"/>
+      <stop offset="100%" stop-color="#cba6f7"/>
+    </linearGradient>
+    <linearGradient id="usb" x1="80" y1="40" x2="176" y2="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#e0e0f0"/>
+    </linearGradient>
+    <linearGradient id="bolt" x1="110" y1="80" x2="150" y2="190" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#f9e2af"/>
+      <stop offset="100%" stop-color="#fab387"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#00000044"/>
+    </filter>
+  </defs>
+
+  <!-- Background circle -->
+  <circle cx="128" cy="128" r="120" fill="url(#bg)"/>
+
+  <!-- USB drive body -->
+  <g filter="url(#shadow)">
+    <!-- Main body -->
+    <rect x="88" y="60" width="80" height="130" rx="8" fill="url(#usb)"/>
+    <!-- Connector notch -->
+    <rect x="98" y="38" width="60" height="30" rx="4" fill="url(#usb)"/>
+    <!-- Connector holes -->
+    <rect x="108" y="44" width="12" height="8" rx="2" fill="#89b4fa"/>
+    <rect x="136" y="44" width="12" height="8" rx="2" fill="#89b4fa"/>
+    <!-- Bottom rounded edge -->
+    <rect x="88" y="170" width="80" height="20" rx="8" fill="url(#usb)"/>
+  </g>
+
+  <!-- Lightning bolt (write/flash symbol) -->
+  <path d="M 138 90 L 118 140 L 132 140 L 118 185 L 148 130 L 134 130 Z"
+        fill="url(#bolt)" stroke="#1e1e2e" stroke-width="2" stroke-linejoin="round"/>
+
+  <!-- Activity LED dot -->
+  <circle cx="128" cy="210" r="5" fill="#a6e3a1">
+    <animate attributeName="opacity" values="1;0.3;1" dur="2s" repeatCount="indefinite"/>
+  </circle>
+</svg>
