@@ -65,9 +65,9 @@ set(ALL_SOURCES
 # ──────────────────────────────────────────────
 # Executable
 # ──────────────────────────────────────────────
-add_executable(rufus-linux ${ALL_SOURCES})
+add_executable(Lufus ${ALL_SOURCES})
 
-target_include_directories(rufus-linux PRIVATE
+target_include_directories(Lufus PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${LIBUDEV_INCLUDE_DIRS}
     ${LIBBLKID_INCLUDE_DIRS}
@@ -75,7 +75,7 @@ target_include_directories(rufus-linux PRIVATE
     ${LIBCURL_INCLUDE_DIRS}
 )
 
-target_link_libraries(rufus-linux PRIVATE
+target_link_libraries(Lufus PRIVATE
     Qt6::Widgets
     Qt6::Core
     Qt6::DBus
@@ -88,12 +88,12 @@ target_link_libraries(rufus-linux PRIVATE
 )
 
 if(WIMLIB_FOUND)
-    target_compile_definitions(rufus-linux PRIVATE HAS_WIMLIB)
-    target_include_directories(rufus-linux PRIVATE ${WIMLIB_INCLUDE_DIRS})
-    target_link_libraries(rufus-linux PRIVATE ${WIMLIB_LIBRARIES})
+    target_compile_definitions(Lufus PRIVATE HAS_WIMLIB)
+    target_include_directories(Lufus PRIVATE ${WIMLIB_INCLUDE_DIRS})
+    target_link_libraries(Lufus PRIVATE ${WIMLIB_LIBRARIES})
 endif()
 
-target_compile_definitions(rufus-linux PRIVATE
+target_compile_definitions(Lufus PRIVATE
     APP_VERSION="${PROJECT_VERSION}"
     APP_NAME="${PROJECT_NAME}"
 )
@@ -129,7 +129,9 @@ endif()
 # ──────────────────────────────────────────────
 # Install
 # ──────────────────────────────────────────────
-install(TARGETS rufus-linux DESTINATION bin)
-install(FILES resources/rufus-linux.desktop DESTINATION share/applications)
-install(FILES resources/icons/rufus-linux.svg DESTINATION share/icons/hicolor/scalable/apps)
-install(FILES polkit/org.rufuslinux.pkexec.policy DESTINATION share/polkit-1/actions)
+install(TARGETS Lufus DESTINATION bin)
+install(FILES resources/io.github.lufus.Lufus.desktop DESTINATION share/applications)
+install(FILES resources/icons/lufus.svg
+        DESTINATION share/icons/hicolor/scalable/apps
+        RENAME io.github.lufus.Lufus.svg)
+install(FILES polkit/io.github.lufus.Lufus.policy DESTINATION share/polkit-1/actions)

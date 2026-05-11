@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Lufus
+GenericName=Bootable USB Creator
+Comment=Create bootable USB drives from ISO images
+Exec=Lufus
+Icon=io.github.lufus.Lufus
+Terminal=false
+Type=Application
+Categories=System;Utility;
+Keywords=USB;bootable;ISO;flash;drive;
+StartupWMClass=Lufus

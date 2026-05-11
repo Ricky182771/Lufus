@@ -12,6 +12,7 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QFile>
+#include <QIcon>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <iostream>
@@ -89,6 +90,10 @@ int main(int argc, char *argv[]) {
     app.setApplicationName("Lufus");
     app.setApplicationVersion(APP_VERSION);
     app.setOrganizationName("Lufus");
+    // Wayland uses the desktop file name to look up the window icon in the icon theme.
+    // Without this, Wayland compositors show a generic "W" placeholder.
+    app.setDesktopFileName("io.github.lufus.Lufus");
+    app.setWindowIcon(QIcon(":/icons/lufus.svg"));
 
     RufusLinux::MainWindow win;
     win.show();

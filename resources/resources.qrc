@@ -3,5 +3,6 @@
     <qresource prefix="/">
         <file>icons/down-triangle.png</file>
         <file>icons/refresh.png</file>
+        <file>icons/lufus.svg</file>
     </qresource>
 </RCC>
