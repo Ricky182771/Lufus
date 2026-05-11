@@ -6,8 +6,12 @@
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QProcess>
 #include <QDebug>
+#include <QDBusConnection>
+#include <QDBusInterface>
+#include <QDBusReply>
 
 #include <unistd.h>
 
@@ -33,19 +37,22 @@ bool Bootloader::install(const QString     &deviceNode,
     const bool isWindows = (analysis.isoType == IsoType::WindowsInstaller ||
                             analysis.isoType == IsoType::WindowsPE);
 
-    // Create the mount point directory if it doesn't exist
-    QDir().mkpath(mountDir);
-
-    // Mount the boot partition
-    bool mounted = false;
+    // Mount the boot partition via UDisks2 (works inside Flatpak sandbox).
+    QString mountPath;
     {
-        QProcess proc;
-        proc.setProgram("mount");
-        proc.setArguments({partNode, mountDir});
-        proc.start();
-        mounted = proc.waitForFinished(15000) && proc.exitCode() == 0;
-        if (!mounted)
-            qWarning() << "Bootloader: could not mount" << partNode << "at" << mountDir;
+        const QString blockPath = QStringLiteral("/org/freedesktop/UDisks2/block_devices/")
+                                  + QFileInfo(partNode).fileName();
+        QDBusInterface fs(QStringLiteral("org.freedesktop.UDisks2"), blockPath,
+                          QStringLiteral("org.freedesktop.UDisks2.Filesystem"),
+                          QDBusConnection::systemBus());
+        fs.setTimeout(30000);
+        QDBusReply<QString> reply = fs.call(QStringLiteral("Mount"), QVariantMap());
+        if (reply.isValid()) {
+            mountPath = reply.value();
+        } else {
+            qWarning() << "Bootloader: UDisks2 mount failed for" << partNode
+                       << ":" << reply.error().message();
+        }
     }
 
     // ── UEFI ──────────────────────────────────────────────────────────────
@@ -54,12 +61,12 @@ bool Bootloader::install(const QString     &deviceNode,
     // it via the standard fallback path regardless of partition type.
     // Secure Boot works because the signed bootloaders come from the ISO.
     if (target == TargetSystem::UefiOnly || target == TargetSystem::BiosAndUefi) {
-        if (mounted) {
+        if (!mountPath.isEmpty()) {
             const QStringList efiCandidates = {
-                mountDir + "/EFI/BOOT/BOOTx64.EFI",
-                mountDir + "/EFI/BOOT/bootx64.efi",
-                mountDir + "/efi/boot/bootx64.efi",
-                mountDir + "/EFI/Microsoft/Boot/bootmgfw.efi",
+                mountPath + "/EFI/BOOT/BOOTx64.EFI",
+                mountPath + "/EFI/BOOT/bootx64.efi",
+                mountPath + "/efi/boot/bootx64.efi",
+                mountPath + "/EFI/Microsoft/Boot/bootmgfw.efi",
             };
             bool efiFound = false;
             for (const QString &p : efiCandidates) {
@@ -82,18 +89,20 @@ bool Bootloader::install(const QString     &deviceNode,
     // still works, and many Linux ISOs carry syslinux/isolinux MBR stubs in
     // the copied files.
     if ((target == TargetSystem::BiosOnly || target == TargetSystem::BiosAndUefi) &&
-        !isWindows && mounted) {
-        installGrubBios(deviceNode, mountDir);
+        !isWindows && !mountPath.isEmpty()) {
+        installGrubBios(deviceNode, mountPath);
     }
 
-    if (mounted) {
+    if (!mountPath.isEmpty()) {
         ::sync();
-        QProcess umount;
-        umount.setProgram("umount");
-        umount.setArguments({mountDir});
-        umount.start();
-        if (!umount.waitForFinished(10000))
-            qWarning() << "Bootloader: umount timed out for" << mountDir;
+        const QString blockPath = QStringLiteral("/org/freedesktop/UDisks2/block_devices/")
+                                  + QFileInfo(partNode).fileName();
+        QDBusInterface fs(QStringLiteral("org.freedesktop.UDisks2"), blockPath,
+                          QStringLiteral("org.freedesktop.UDisks2.Filesystem"),
+                          QDBusConnection::systemBus());
+        QVariantMap opts;
+        opts[QStringLiteral("force")] = true;
+        fs.call(QStringLiteral("Unmount"), opts);
     }
 
     emit progressChanged(90, tr("Bootloader setup complete."));

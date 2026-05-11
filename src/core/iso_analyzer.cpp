@@ -5,10 +5,16 @@
 #include "core/iso_analyzer.h"
 
 #include <QFileInfo>
+#include <QFile>
 #include <QDebug>
 #include <QProcess>
-#include <QTemporaryDir>
+#include <QThread>
 #include <QDir>
+#include <QDBusConnection>
+#include <QDBusInterface>
+#include <QDBusReply>
+#include <QDBusObjectPath>
+#include <QDBusUnixFileDescriptor>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -317,64 +323,59 @@ void IsoAnalyzer::scanViaMount(const QString &isoPath, IsoAnalysis &result) {
     if (scanVia7z(isoPath, result))
         return;
 
-    // Fallback: mount via loop device.
-    QTemporaryDir tmp;
-    if (!tmp.isValid()) return;
-
-    // Ensure loop module is loaded (no-op if already loaded).
-    { QProcess m; m.setProgram("modprobe"); m.setArguments({"loop"}); m.start(); m.waitForFinished(5000); }
-
-    // Explicit losetup is more reliable than "mount -o loop" because the
-    // kernel allocates the device name before we try to mount it.
-    QString loopDev;
-    {
-        QProcess lo;
-        lo.setProgram("losetup");
-        lo.setArguments({"--find", "--show", "--read-only", isoPath});
-        lo.start();
-        if (lo.waitForFinished(10000) && lo.exitCode() == 0)
-            loopDev = QString::fromUtf8(lo.readAllStandardOutput()).trimmed();
+    // Fallback: mount via UDisks2 loop device (works inside Flatpak sandbox).
+    QFile isoFile(isoPath);
+    if (!isoFile.open(QIODevice::ReadOnly)) {
+        qWarning() << "scanViaMount: cannot open ISO" << isoPath;
+        return;
     }
+    QDBusUnixFileDescriptor ufd(isoFile.handle());
+    QVariantMap loopOpts;
+    loopOpts[QStringLiteral("read-only")] = true;
 
-    bool mounted = false;
-    if (!loopDev.isEmpty()) {
-        QProcess mnt;
-        mnt.setProgram("mount");
-        mnt.setArguments({"-o", "ro", loopDev, tmp.path()});
-        mnt.start();
-        mounted = mnt.waitForFinished(15000) && mnt.exitCode() == 0;
-        if (!mounted) {
-            qWarning() << "scanViaMount: mount" << loopDev << "failed:" << mnt.readAllStandardError();
-            QProcess ld; ld.setProgram("losetup"); ld.setArguments({"-d", loopDev}); ld.start(); ld.waitForFinished(5000);
-            loopDev.clear();
-        }
+    QDBusInterface mgr(QStringLiteral("org.freedesktop.UDisks2"),
+                       QStringLiteral("/org/freedesktop/UDisks2/Manager"),
+                       QStringLiteral("org.freedesktop.UDisks2.Manager"),
+                       QDBusConnection::systemBus());
+    QDBusReply<QDBusObjectPath> loopReply =
+        mgr.call(QStringLiteral("LoopSetup"), QVariant::fromValue(ufd), loopOpts);
+    if (!loopReply.isValid()) {
+        qWarning() << "scanViaMount: LoopSetup failed:" << loopReply.error().message();
+        return;
     }
+    const QString loopObjectPath = loopReply.value().path();
 
-    if (!mounted) {
-        // Last resort: legacy "mount -o loop" (works on many distros).
-        QProcess mnt;
-        mnt.setProgram("mount");
-        mnt.setArguments({"-o", "loop,ro", isoPath, tmp.path()});
-        mnt.start();
-        if (!mnt.waitForFinished(15000) || mnt.exitCode() != 0) {
-            qWarning() << "scanViaMount: all mount approaches failed:"
-                       << QString::fromUtf8(mnt.readAllStandardError()).trimmed();
-            return;
-        }
-        mounted = true;
+    // Give UDisks2 time to probe the loop device's filesystem.
+    QThread::msleep(600);
+
+    QDBusInterface loopFs(QStringLiteral("org.freedesktop.UDisks2"),
+                          loopObjectPath,
+                          QStringLiteral("org.freedesktop.UDisks2.Filesystem"),
+                          QDBusConnection::systemBus());
+    loopFs.setTimeout(30000);
+    QDBusReply<QString> mountReply = loopFs.call(QStringLiteral("Mount"), QVariantMap());
+    if (!mountReply.isValid()) {
+        qWarning() << "scanViaMount: Mount failed:" << mountReply.error().message();
+        QDBusInterface loopDev(QStringLiteral("org.freedesktop.UDisks2"), loopObjectPath,
+                               QStringLiteral("org.freedesktop.UDisks2.Loop"),
+                               QDBusConnection::systemBus());
+        loopDev.call(QStringLiteral("Delete"), QVariantMap());
+        return;
     }
+    const QString mountPath = mountReply.value();
 
     const int prevCount = result.allFiles.size();
     result.allFiles.clear();
     result.largestFileSize = 0;
-    scanMountedDir(tmp.path(), "", result);
+    scanMountedDir(mountPath, "", result);
     qDebug() << "scanViaMount: found" << result.allFiles.size()
-             << "files via mount (was" << prevCount << ")";
+             << "files via UDisks2 loop mount (was" << prevCount << ")";
 
-    { QProcess u; u.setProgram("umount"); u.setArguments({tmp.path()}); u.start(); u.waitForFinished(10000); }
-    if (!loopDev.isEmpty()) {
-        QProcess ld; ld.setProgram("losetup"); ld.setArguments({"-d", loopDev}); ld.start(); ld.waitForFinished(5000);
-    }
+    loopFs.call(QStringLiteral("Unmount"), QVariantMap());
+    QDBusInterface loopDev(QStringLiteral("org.freedesktop.UDisks2"), loopObjectPath,
+                           QStringLiteral("org.freedesktop.UDisks2.Loop"),
+                           QDBusConnection::systemBus());
+    loopDev.call(QStringLiteral("Delete"), QVariantMap());
 }
 
 bool IsoAnalyzer::scanVia7z(const QString &isoPath, IsoAnalysis &result) {
