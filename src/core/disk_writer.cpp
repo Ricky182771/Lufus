@@ -6,6 +6,7 @@
 #include "core/bootloader.h"
 
 #include <QProcess>
+#include <QThread>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -128,9 +129,7 @@ namespace RufusLinux {
 
         // Montar ISO (read-only) vía UDisks2 loop device
         QString isoMount = mountPartition(config.isoPath);
-        if (isoMount.isEmpty()) {
-            emit errorOccurred(tr("Cannot mount ISO.")); return false;
-        }
+        if (isoMount.isEmpty()) return false; // error already emitted by mountPartition
 
         if (isWindows) {
             // ── Windows: single FAT32 partition + wimlib WIM split ─────────────
@@ -375,7 +374,7 @@ namespace RufusLinux {
             loopOpts[QStringLiteral("read-only")] = true;
 
             QDBusInterface mgr(QStringLiteral("org.freedesktop.UDisks2"),
-                               QStringLiteral("/org/freedesktop/UDisks2"),
+                               QStringLiteral("/org/freedesktop/UDisks2/Manager"),
                                QStringLiteral("org.freedesktop.UDisks2.Manager"),
                                QDBusConnection::systemBus());
             QDBusReply<QDBusObjectPath> loopReply =
@@ -386,6 +385,8 @@ namespace RufusLinux {
             }
             objectPath = loopReply.value().path();
             m_activeLoops.insert(objectPath);
+            // Give UDisks2 time to probe the loop device's filesystem before Mount.
+            QThread::msleep(600);
         } else {
             objectPath = udisksPath(partNodeOrIso);
         }
@@ -394,10 +395,24 @@ namespace RufusLinux {
                           objectPath,
                           QStringLiteral("org.freedesktop.UDisks2.Filesystem"),
                           QDBusConnection::systemBus());
-        QDBusReply<QString> mountReply = fs.call(QStringLiteral("Mount"), QVariantMap());
+        fs.setTimeout(30000);
+
+        // Retry up to 3 times; UDisks2 may not have exposed the Filesystem
+        // interface on the loop device immediately after LoopSetup.
+        QDBusReply<QString> mountReply;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            mountReply = fs.call(QStringLiteral("Mount"), QVariantMap());
+            if (mountReply.isValid()) break;
+            qWarning() << "Filesystem.Mount attempt" << (attempt + 1) << "failed for"
+                       << objectPath << ":" << mountReply.error().message();
+            if (attempt < 2) QThread::msleep(400);
+        }
+
         if (!mountReply.isValid()) {
-            qWarning() << "Filesystem.Mount failed for" << objectPath
-                       << ":" << mountReply.error().message();
+            const QString dbusErr = mountReply.error().message();
+            qWarning() << "Filesystem.Mount ultimately failed for" << objectPath << ":" << dbusErr;
+            emit errorOccurred(tr("Cannot mount %1: %2")
+                               .arg(QFileInfo(partNodeOrIso).fileName(), dbusErr));
             if (m_activeLoops.contains(objectPath)) {
                 QDBusInterface loop(QStringLiteral("org.freedesktop.UDisks2"), objectPath,
                                     QStringLiteral("org.freedesktop.UDisks2.Loop"),
