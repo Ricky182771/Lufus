@@ -14,7 +14,6 @@
 #include <QGroupBox>
 #include <QCheckBox>
 #include <QThread>
-#include <QProcess>
 #include <QFile>
 #include <QTimer>
 #include <QElapsedTimer>
@@ -130,9 +129,10 @@ private:
     QCheckBox    *m_badBlocksCheck    = nullptr;
 
     // ── Core components ──
-    DeviceManager  *m_deviceMgr       = nullptr;
-    IsoAnalyzer    *m_isoAnalyzer     = nullptr;
-    QProcess       *m_backendProcess  = nullptr;
+    DeviceManager  *m_deviceMgr    = nullptr;
+    IsoAnalyzer    *m_isoAnalyzer  = nullptr;
+    QThread        *m_writeThread  = nullptr;
+    DiskWriter     *m_writer       = nullptr;
     QFile           m_logFile;
 
     // ── State ──

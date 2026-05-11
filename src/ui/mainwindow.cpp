@@ -15,11 +15,7 @@
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QIcon>
-#include <QProcess>
-#include <QJsonObject>
-#include <QJsonDocument>
 #include <QFile>
-#include <QTemporaryFile>
 #include <QStandardItemModel>
 #include <QtConcurrent>
 #include <QFutureWatcher>
@@ -27,8 +23,6 @@
 #include <QDesktopServices>
 #include <QUrl>
 #include <QTime>
-#include <QUuid>
-#include <unistd.h>
 
 namespace RufusLinux {
 
@@ -54,9 +48,11 @@ MainWindow::MainWindow(QWidget *parent)
 }
 
 MainWindow::~MainWindow() {
-    if (m_backendProcess && m_backendProcess->state() != QProcess::NotRunning) {
-        m_backendProcess->kill();
-        m_backendProcess->waitForFinished(5000);
+    if (m_writer)
+        m_writer->cancel();
+    if (m_writeThread) {
+        m_writeThread->quit();
+        m_writeThread->wait(5000);
     }
 }
 
@@ -634,80 +630,55 @@ void MainWindow::startWrite() {
     m_timerLabel->setStyleSheet("color: #a6e3a1; font-family: monospace; font-size: 11px;");
     m_tickTimer->start();
 
-    // FIX: config JSON va a un archivo con nombre único por sesión,
-    // no a una ruta hardcoded que colisionaría en entornos multi-usuario.
-    QJsonObject configObj;
-    configObj["isoPath"]      = m_currentAnalysis.filePath;
-    configObj["deviceNode"]   = dev.deviceNode;
-    configObj["mode"]         = (int)((m_writeModeCombo->currentIndex() == 1)
-                                      ? WriteMode::DD : WriteMode::ISO);
-    configObj["scheme"]       = (int)((m_partSchemeCombo->currentIndex() == 0)
-                                      ? PartitionScheme::MBR : PartitionScheme::GPT);
-    configObj["filesystem"]   = m_filesystemCombo->currentData().toInt();
-    configObj["volumeLabel"]  = m_volumeLabel->text();
+    // Build the write config directly — no JSON serialization or subprocess needed.
+    WriteConfig config;
+    config.isoPath  = m_currentAnalysis.filePath;
+    config.deviceNode = dev.deviceNode;
+    config.mode = (m_writeModeCombo->currentIndex() == 1) ? WriteMode::DD : WriteMode::ISO;
+    config.dualPartition = false;
+    config.needsSplitWim = m_currentAnalysis.needsSplitWim;
+    config.isoType       = m_currentAnalysis.isoType;
 
-    int targetIdx = m_targetCombo->currentIndex();
-    if (m_partSchemeCombo->currentIndex() == 0) { // MBR
-        configObj["target"] = targetIdx;
-    } else { // GPT: índice 0 = UEFI only, índice 1 = BIOS+UEFI
-        configObj["target"] = (targetIdx == 0)
-                              ? (int)TargetSystem::UefiOnly
-                              : (int)TargetSystem::BiosAndUefi;
-    }
+    config.partConfig.scheme = (m_partSchemeCombo->currentIndex() == 0)
+                               ? PartitionScheme::MBR : PartitionScheme::GPT;
+    config.partConfig.filesystem =
+        static_cast<FileSystem>(m_filesystemCombo->currentData().toInt());
+    config.partConfig.volumeLabel = m_volumeLabel->text();
+    config.partConfig.clusterSize = 0;
 
-    configObj["dualPartition"] = false;  // Windows uses single FAT32 + wimlib split now
-    configObj["needsSplitWim"] = m_currentAnalysis.needsSplitWim;
-    configObj["isoType"]       = (int)m_currentAnalysis.isoType;
-
-    // FIX: nombre de archivo único por sesión para evitar colisiones multi-usuario
-    QString uuid    = QUuid::createUuid().toString(QUuid::WithoutBraces).left(8);
-    QString jsonPath = QString("/tmp/rufus_backend_%1.json").arg(uuid);
-
-    QFile file(jsonPath);
-    if (file.open(QIODevice::WriteOnly)) {
-        file.write(QJsonDocument(configObj).toJson());
-        file.close();
-    }
-
-    log(tr("Starting backend write to %1...").arg(dev.deviceNode));
-
-    m_backendProcess = new QProcess(this);
-    connect(m_backendProcess, &QProcess::readyReadStandardOutput, this, [this]() {
-        while (m_backendProcess->canReadLine()) {
-            QString line = QString::fromUtf8(m_backendProcess->readLine()).trimmed();
-            if (line.startsWith("PROGRESS:")) {
-                QStringList parts = line.split(':');
-                if (parts.size() >= 3) {
-                    int pct = parts[1].toInt();
-                    QString msg = parts.mid(2).join(':');
-                    onWriteProgress(pct, msg);
-                }
-            } else if (line.startsWith("ERROR:")) {
-                onWriteError(line.mid(6));
-            } else {
-                log("[Backend] " + line);
-            }
-        }
-    });
-
-    connect(m_backendProcess,
-            QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this, jsonPath](int exitCode) {
-        QFile::remove(jsonPath); // limpiar config temporal
-        onWriteCompleted(exitCode == 0);
-    });
-
-    QString appPath = QCoreApplication::applicationFilePath();
-    if (geteuid() != 0) {
-        m_backendProcess->start("pkexec", {appPath, "--write-backend", jsonPath});
+    const int targetIdx = m_targetCombo->currentIndex();
+    if (config.partConfig.scheme == PartitionScheme::MBR) {
+        config.partConfig.target = static_cast<TargetSystem>(targetIdx);
     } else {
-        m_backendProcess->start(appPath, {"--write-backend", jsonPath});
+        config.partConfig.target = (targetIdx == 0)
+                                   ? TargetSystem::UefiOnly
+                                   : TargetSystem::BiosAndUefi;
     }
+
+    log(tr("Starting write to %1 via UDisks2...").arg(dev.deviceNode));
+
+    m_writer = new DiskWriter();
+    m_writeThread = new QThread(this);
+    m_writer->moveToThread(m_writeThread);
+
+    connect(m_writer, &DiskWriter::progressChanged, this, &MainWindow::onWriteProgress);
+    connect(m_writer, &DiskWriter::errorOccurred,   this, &MainWindow::onWriteError);
+    connect(m_writer, &DiskWriter::writeCompleted, this, &MainWindow::onWriteCompleted);
+    connect(m_writer, &DiskWriter::writeCompleted, m_writeThread, &QThread::quit);
+    connect(m_writeThread, &QThread::finished, m_writer, &QObject::deleteLater);
+    connect(m_writeThread, &QThread::finished, m_writeThread, &QObject::deleteLater);
+
+    const IsoAnalysis analysis = m_currentAnalysis;
+    connect(m_writeThread, &QThread::started, m_writer, [this, config, analysis]() {
+        m_writer->write(config, analysis);
+    });
+
+    m_writeThread->start();
 }
 
 void MainWindow::cancelWrite() {
-    if (m_backendProcess && m_backendProcess->state() != QProcess::NotRunning)
-        m_backendProcess->kill();
+    if (m_writer)
+        m_writer->cancel();
     log(tr("Cancellation requested..."));
 }
 
@@ -746,10 +717,8 @@ void MainWindow::onWriteCompleted(bool success) {
         log(tr("Write FAILED."));
     }
 
-    if (m_backendProcess) {
-        m_backendProcess->deleteLater();
-        m_backendProcess = nullptr;
-    }
+    m_writer = nullptr;      // deleteLater already connected to QThread::finished
+    m_writeThread = nullptr; // same
 }
 
 // ──────────────────────────────────────────────

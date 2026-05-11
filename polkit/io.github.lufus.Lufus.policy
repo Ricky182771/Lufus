@@ -2,16 +2,21 @@
 <!DOCTYPE policyconfig PUBLIC
  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  Lufus no necesita una policy propia: toda la autorización de escritura
+  en discos la gestiona UDisks2 a través de sus propias acciones Polkit
+  (org.freedesktop.udisks2.modify-device y org.freedesktop.udisks2.open-device).
+  El diálogo de autenticación que ve el usuario proviene de UDisks2.
+  Este archivo se mantiene como referencia; no es estrictamente necesario.
+-->
 <policyconfig>
-    <action id="io.github.lufus.Lufus.write">
-        <description>Write ISO to USB device</description>
-        <message>Authentication is required to write to a USB device</message>
+    <action id="io.github.lufus.Lufus.write-usb">
+        <description>Write a bootable ISO image to a USB drive</description>
+        <message>Authentication is required to write to a USB drive</message>
         <defaults>
             <allow_any>auth_admin</allow_any>
             <allow_inactive>auth_admin</allow_inactive>
             <allow_active>auth_admin_keep</allow_active>
         </defaults>
-        <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/Lufus</annotate>
-        <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
     </action>
 </policyconfig>

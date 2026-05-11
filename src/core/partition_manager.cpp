@@ -4,12 +4,15 @@
  */
 #include "core/partition_manager.h"
 
-#include <QProcess>
 #include <QDebug>
 #include <QThread>
 #include <QDir>
 #include <QFileInfo>
-#include <iostream>
+#include <QDBusConnection>
+#include <QDBusInterface>
+#include <QDBusReply>
+#include <QDBusObjectPath>
+#include <QDBusUnixFileDescriptor>
 
 namespace RufusLinux {
 
@@ -25,35 +28,19 @@ namespace RufusLinux {
         QString baseName = QFileInfo(deviceNode).fileName();
         QDir sysBlock(QString("/sys/block/%1").arg(baseName));
 
-        QStringList partitions;
+        // Enumerate partitions from sysfs, then try to unmount each via UDisks2.
+        // Failures are non-fatal: the subsequent Format call overwrites everything.
         for (const auto &entry : sysBlock.entryList(QDir::Dirs | QDir::NoDotAndDotDot))
             if (entry.startsWith(baseName))
-                partitions.append("/dev/" + entry);
-        partitions.prepend(deviceNode);
-
-        bool allOk = true;
-        for (const auto &part : partitions) {
-            int ret = runCommand("umount", {part}, 10000);
-            if (ret != 0 && ret != 32) {
-                ret = runCommand("umount", {"-l", part}, 10000);
-                if (ret != 0 && ret != 32) {
-                    qWarning() << "Failed to unmount" << part;
-                    allOk = false;
-                }
-            }
-        }
-        return allOk;
+                udisksUnmount(udisksBlockPath("/dev/" + entry));
+        udisksUnmount(udisksBlockPath(deviceNode));
+        return true;
     }
 
     // ──────────────────────────────────────────────
-    // Wipe
+    // Wipe (no-op — Format("gpt"/"dos") wipes implicitly)
     // ──────────────────────────────────────────────
-    bool PartitionManager::wipeDisk(const QString &deviceNode) {
-        emit progressChanged(10, tr("Wiping filesystem signatures on %1...").arg(deviceNode));
-        if (runCommand("wipefs", {"--all", "--force", deviceNode}, 15000) != 0) {
-            emit errorOccurred(tr("Failed to wipe disk signatures on %1").arg(deviceNode));
-            return false;
-        }
+    bool PartitionManager::wipeDisk(const QString &) {
         return true;
     }
 
@@ -75,50 +62,53 @@ namespace RufusLinux {
                                         bool dualPartition, uint64_t espSizeMB)
     {
         emit progressChanged(20, tr("Creating MBR partition table on %1...").arg(deviceNode));
+        const QString blockPath = udisksBlockPath(deviceNode);
 
-        // Para MBR+Windows: necesitamos una partición FAT32 pequeña que contenga
-        // bootmgr + BCD, y una NTFS grande para los archivos de instalación.
-        // Para MBR+Linux con single partition: una partición activa ocupa todo.
+        // Create an empty MBR partition table (also wipes existing signatures).
+        if (!udisksFormat(blockPath, QStringLiteral("dos")))  {
+            emit errorOccurred(tr("Failed to create MBR partition table on %1").arg(deviceNode));
+            return false;
+        }
+        QThread::msleep(500);
 
-        QProcess proc;
-        proc.setProgram("sfdisk");
-        proc.setArguments({"--force", deviceNode});
-
-        QString script = "label: dos\n";
         if (dualPartition) {
-            // Partición 1: FAT32 para boot (1 GB), activa (bootable)
-            script += QString("size=%1M, type=0c, bootable\n").arg(espSizeMB);
-            // Partición 2: NTFS/data para el resto
-            QString typeHex;
-            switch (config.filesystem) {
-                case FileSystem::NTFS: typeHex = "07"; break;
-                case FileSystem::ext4: typeHex = "83"; break;
-                default:               typeHex = "0c"; break;
+            // Partition 1: FAT32 boot (espSizeMB), bootable
+            const QString p1 = udisksCreatePartition(blockPath,
+                0, espSizeMB * 1024 * 1024,
+                QStringLiteral("0x0c"), QStringLiteral("Boot"));
+            if (p1.isEmpty()) {
+                emit errorOccurred(tr("Failed to create boot partition on %1").arg(deviceNode));
+                return false;
             }
-            script += QString("type=%1\n").arg(typeHex);
+            // Partition 2: data (fill rest)
+            QString dataType;
+            switch (config.filesystem) {
+                case FileSystem::NTFS: dataType = QStringLiteral("0x07"); break;
+                case FileSystem::ext4: dataType = QStringLiteral("0x83"); break;
+                default:               dataType = QStringLiteral("0x0c"); break;
+            }
+            const quint64 p1End = udisksPartitionEnd(udisksBlockPath(p1));
+            const QString p2 = udisksCreatePartition(blockPath,
+                p1End, 0, dataType, QStringLiteral("Data"));
+            if (p2.isEmpty()) {
+                emit errorOccurred(tr("Failed to create data partition on %1").arg(deviceNode));
+                return false;
+            }
         } else {
             QString typeHex;
             switch (config.filesystem) {
-                case FileSystem::FAT32: typeHex = "0c"; break;
-                case FileSystem::NTFS:  typeHex = "07"; break;
-                case FileSystem::exFAT: typeHex = "07"; break;
-                case FileSystem::ext4:  typeHex = "83"; break;
-                case FileSystem::UDF:   typeHex = "07"; break;
+                case FileSystem::FAT32: typeHex = QStringLiteral("0x0c"); break;
+                case FileSystem::NTFS:  typeHex = QStringLiteral("0x07"); break;
+                case FileSystem::exFAT: typeHex = QStringLiteral("0x07"); break;
+                case FileSystem::ext4:  typeHex = QStringLiteral("0x83"); break;
+                case FileSystem::UDF:   typeHex = QStringLiteral("0x07"); break;
             }
-            script += QString("type=%1, bootable\n").arg(typeHex);
+            if (udisksCreatePartition(blockPath, 0, 0, typeHex, QStringLiteral("LUFUS")).isEmpty()) {
+                emit errorOccurred(tr("Failed to create partition on %1").arg(deviceNode));
+                return false;
+            }
         }
-
-        proc.start();
-        if (!proc.waitForStarted(5000)) { emit errorOccurred(tr("Failed to start sfdisk")); return false; }
-        proc.write(script.toUtf8());
-        proc.closeWriteChannel();
-        if (!proc.waitForFinished(30000) || proc.exitCode() != 0) {
-            emit errorOccurred(tr("sfdisk failed: %1")
-            .arg(QString::fromUtf8(proc.readAllStandardError())));
-            return false;
-        }
-        runCommand("partprobe", {deviceNode}, 10000);
-        QThread::msleep(800);
+        QThread::msleep(500);
         return true;
     }
 
@@ -127,55 +117,50 @@ namespace RufusLinux {
                                         bool dualPartition, uint64_t espSizeMB)
     {
         emit progressChanged(20, tr("Creating GPT partition table on %1...").arg(deviceNode));
+        const QString blockPath = udisksBlockPath(deviceNode);
 
-        // FIX: En GPT para Windows SIEMPRE creamos dos particiones:
-        //   1. FAT32 ESP (EFI System Partition, tipo C12A7328...) — aquí va
-        //      EFI/BOOT/BOOTx64.EFI y bootmgr. El firmware UEFI SOLO puede
-        //      leer FAT32, así que esta partición es obligatoria.
-        //   2. NTFS/data (tipo EBD0...) — aquí van los archivos de instalación.
-        //
-        // Una sola partición NTFS en GPT NUNCA arranca por UEFI porque el
-        // firmware no puede leer NTFS. El código anterior creaba solo una
-        // partición EBD0 para Windows, lo que hacía imposible el arranque.
-        //
-        // Para Linux con single partition: FAT32 o ext4 en EBD0 (el firmware
-        // permisivo puede arrancar desde FAT32 en EBD0, y GRUB maneja el resto).
+        // GPT para Windows SIEMPRE usa dos particiones:
+        //   1. FAT32 ESP — el firmware UEFI solo puede leer FAT32.
+        //   2. NTFS/data — archivos de instalación.
+        // Una sola partición NTFS en GPT nunca arranca por UEFI.
+        // Para Linux single: FAT32 en EBD0A0A2 (el firmware permisivo arranca desde aquí).
 
-        QProcess proc;
-        proc.setProgram("sfdisk");
-        proc.setArguments({"--force", deviceNode});
-
-        QString script = "label: gpt\n";
-
-        if (dualPartition) {
-            // Windows dual: ESP (FAT32) + DATA (NTFS)
-            script += QString("size=%1M, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name=\"EFI System Partition\"\n")
-            .arg(espSizeMB);
-            QString dataType;
-            switch (config.filesystem) {
-                case FileSystem::ext4: dataType = "0FC63DAF-8483-4772-8E79-3D69D8477DE4"; break;
-                default:               dataType = "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"; break;
-            }
-            script += QString("type=%1, name=\"Windows\"\n").arg(dataType);
-        } else {
-            // Single partition: always Microsoft basic data (EBD0A0A2).
-            // WinPE only mounts partitions of this type as drive letters; ESP-typed
-            // partitions are ignored by setup.exe. UEFI can boot from any FAT32
-            // partition containing EFI/BOOT/BOOTx64.efi regardless of type.
-            script += "type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=\"LUFUS\"\n";
-        }
-
-        proc.start();
-        if (!proc.waitForStarted(5000)) { emit errorOccurred(tr("Failed to start sfdisk")); return false; }
-        proc.write(script.toUtf8());
-        proc.closeWriteChannel();
-        if (!proc.waitForFinished(30000) || proc.exitCode() != 0) {
-            emit errorOccurred(tr("sfdisk GPT partitioning failed: %1")
-            .arg(QString::fromUtf8(proc.readAllStandardError()).trimmed()));
+        if (!udisksFormat(blockPath, QStringLiteral("gpt"))) {
+            emit errorOccurred(tr("Failed to create GPT partition table on %1").arg(deviceNode));
             return false;
         }
-        runCommand("partprobe", {deviceNode}, 10000);
-        QThread::msleep(800);
+        QThread::msleep(500);
+
+        if (dualPartition) {
+            const QString p1 = udisksCreatePartition(blockPath,
+                0, espSizeMB * 1024 * 1024,
+                QStringLiteral("C12A7328-F81F-11D2-BA4B-00A0C93EC93B"),
+                QStringLiteral("EFI System Partition"));
+            if (p1.isEmpty()) {
+                emit errorOccurred(tr("Failed to create EFI partition on %1").arg(deviceNode));
+                return false;
+            }
+            QString dataType;
+            switch (config.filesystem) {
+                case FileSystem::ext4: dataType = QStringLiteral("0FC63DAF-8483-4772-8E79-3D69D8477DE4"); break;
+                default:               dataType = QStringLiteral("EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"); break;
+            }
+            const quint64 p1End = udisksPartitionEnd(udisksBlockPath(p1));
+            const QString p2 = udisksCreatePartition(blockPath,
+                p1End, 0, dataType, QStringLiteral("Windows"));
+            if (p2.isEmpty()) {
+                emit errorOccurred(tr("Failed to create data partition on %1").arg(deviceNode));
+                return false;
+            }
+        } else {
+            if (udisksCreatePartition(blockPath, 0, 0,
+                    QStringLiteral("EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"),
+                    QStringLiteral("LUFUS")).isEmpty()) {
+                emit errorOccurred(tr("Failed to create partition on %1").arg(deviceNode));
+                return false;
+            }
+        }
+        QThread::msleep(500);
         return true;
     }
 
@@ -183,81 +168,42 @@ namespace RufusLinux {
     // Format
     // ──────────────────────────────────────────────
     bool PartitionManager::formatPartition(const QString &partNode, FileSystem fs,
-                                           const QString &label, uint32_t clusterSize)
+                                           const QString &label, uint32_t /*clusterSize*/)
     {
-        emit progressChanged(40, tr("Formatting %1 as %2...").arg(partNode, mkfsCommand(fs)));
+        emit progressChanged(40, tr("Formatting %1...").arg(partNode));
 
         auto truncLabel = [&](int maxLen) -> QString {
-            QString s = label;
-            if (s.length() > maxLen) s.truncate(maxLen);
+            QString s = label.left(maxLen);
             return s;
         };
 
-        QStringList args;
-        QString program = mkfsCommand(fs);
+        QString type;
+        QVariantMap opts;
 
         switch (fs) {
-
-            case FileSystem::FAT32: {
-                QString lbl = truncLabel(11).toUpper().trimmed();
-                args << "-F" << "32";
-                if (!lbl.isEmpty()) args << "-n" << lbl;
-                if (clusterSize > 0) args << "-s" << QString::number(clusterSize / 512);
-                args << partNode;
+            case FileSystem::FAT32:
+                type = QStringLiteral("vfat");
+                opts[QStringLiteral("label")] = truncLabel(11).toUpper().trimmed();
                 break;
-            }
-
-            case FileSystem::NTFS: {
-                QString lbl = truncLabel(32);
-                args << "-f" << "-Q";
-                if (!lbl.isEmpty()) args << "-L" << lbl;
-                if (clusterSize > 0) args << "-c" << QString::number(clusterSize);
-                args << partNode;
+            case FileSystem::NTFS:
+                type = QStringLiteral("ntfs");
+                opts[QStringLiteral("label")] = truncLabel(32);
                 break;
-            }
-
-            case FileSystem::exFAT: {
-                QString lbl = truncLabel(15);
-                // Intentar con -L (versiones modernas), fallback a -n
-                QStringList a1; if (!lbl.isEmpty()) a1 << "-L" << lbl;
-                if (clusterSize > 0) a1 << "-c" << QString::number(clusterSize);
-                a1 << partNode;
-                if (runCommand(program, a1, 120000) == 0) return true;
-                qWarning() << "mkfs.exfat -L failed, retrying with -n";
-                QStringList a2; if (!lbl.isEmpty()) a2 << "-n" << lbl;
-                if (clusterSize > 0) a2 << "-c" << QString::number(clusterSize);
-                a2 << partNode;
-                if (runCommand(program, a2, 120000) != 0) {
-                    emit errorOccurred(tr("Formatting failed on %1").arg(partNode));
-                    return false;
-                }
-                return true;
-            }
-
-            case FileSystem::ext4: {
-                QString lbl = truncLabel(16);
-                args << "-F";
-                if (!lbl.isEmpty()) args << "-L" << lbl;
-                args << partNode;
+            case FileSystem::exFAT:
+                type = QStringLiteral("exfat");
+                opts[QStringLiteral("label")] = truncLabel(15);
                 break;
-            }
-
-            case FileSystem::UDF: {
-                QString lbl = truncLabel(31);
-                if (!lbl.isEmpty()) args << ("--label=" + lbl);
-                args << "--blocksize=512" << partNode;
-                if (runCommand(program, args, 120000) == 0) return true;
-                qWarning() << "mkudffs failed, trying mkfs.udf";
-                if (runCommand("mkfs.udf", args, 120000) != 0) {
-                    emit errorOccurred(tr("Formatting failed on %1").arg(partNode));
-                    return false;
-                }
-                return true;
-            }
-
+            case FileSystem::ext4:
+                type = QStringLiteral("ext4");
+                opts[QStringLiteral("label")] = truncLabel(16);
+                break;
+            case FileSystem::UDF:
+                type = QStringLiteral("udf");
+                opts[QStringLiteral("label")] = truncLabel(31);
+                break;
         }
 
-        if (runCommand(program, args, 120000) != 0) {
+        if (!udisksFormat(udisksBlockPath(partNode), type, opts)) {
             emit errorOccurred(tr("Formatting failed on %1").arg(partNode));
             return false;
         }
@@ -272,23 +218,35 @@ namespace RufusLinux {
                                               bool dualPartition,
                                               uint64_t espSizeMB)
     {
+        unmountAll(deviceNode);
+        // wipeDisk is a no-op — partitionDisk's Format call wipes implicitly.
+        if (!partitionDisk(deviceNode, config, dualPartition, espSizeMB)) return {};
+
+        // Derive partition device nodes from the Block.Device property of the
+        // newly created partitions via UDisks2 (avoids manual nvme/loop suffix logic).
+        // UDisks2 object path for sdb1 is /org/.../block_devices/sdb1; the
+        // Block.Device property holds the canonical /dev/sdb1 path.
+        auto partDevNode = [&](int n) -> QString {
+            // Fast path: construct the expected object path and read its Device property.
+            QString sep  = deviceNode.contains(QLatin1String("nvme")) ? QStringLiteral("p") : QString();
+            QString node = deviceNode + sep + QString::number(n);
+            QDBusInterface blk(QStringLiteral("org.freedesktop.UDisks2"),
+                               udisksBlockPath(node),
+                               QStringLiteral("org.freedesktop.UDisks2.Block"),
+                               QDBusConnection::systemBus());
+            QByteArray dev = blk.property("Device").toByteArray();
+            return dev.isEmpty() ? node : QString::fromUtf8(dev);
+        };
+
         QStringList result;
-
-        if (!unmountAll(deviceNode)) return result;
-        if (!wipeDisk(deviceNode))   return result;
-        if (!partitionDisk(deviceNode, config, dualPartition, espSizeMB)) return result;
-
-        QString sep   = deviceNode.contains("nvme") ? "p" : "";
-        QString part1 = deviceNode + sep + "1";
-
         if (dualPartition) {
-            QString part2 = deviceNode + sep + "2";
-            // Partición 1: siempre FAT32 (EFI/boot), sin label visible al usuario
-            if (!formatPartition(part1, FileSystem::FAT32, "EFI", 0)) return {};
-            // Partición 2: filesystem del usuario con su label
+            const QString part1 = partDevNode(1);
+            const QString part2 = partDevNode(2);
+            if (!formatPartition(part1, FileSystem::FAT32, QStringLiteral("EFI"), 0)) return {};
             if (!formatPartition(part2, config.filesystem, config.volumeLabel, config.clusterSize)) return {};
             result << part1 << part2;
         } else {
+            const QString part1 = partDevNode(1);
             if (!formatPartition(part1, config.filesystem, config.volumeLabel, config.clusterSize)) return {};
             result << part1;
         }
@@ -337,20 +295,80 @@ namespace RufusLinux {
         return 4096;
     }
 
-    int PartitionManager::runCommand(const QString &program, const QStringList &args, int timeoutMs) {
-        qDebug() << "Running:" << program << args.join(' ');
-        QProcess proc;
-        proc.setProgram(program);
-        proc.setArguments(args);
-        proc.start();
-        if (!proc.waitForStarted(5000)) { qWarning() << "Failed to start" << program; return -1; }
-        if (!proc.waitForFinished(timeoutMs)) { qWarning() << program << "timed out"; proc.kill(); return -1; }
-        if (proc.exitCode() != 0) {
-            QString e = QString::fromUtf8(proc.readAllStandardError()).trimmed();
-            qWarning() << program << "exited" << proc.exitCode() << ":" << e;
-            std::cout << "ERROR: [" << program.toStdString() << "] " << e.toStdString() << std::endl;
+    // ──────────────────────────────────────────────
+    // UDisks2 helpers
+    // ──────────────────────────────────────────────
+    QString PartitionManager::udisksBlockPath(const QString &devNode) {
+        return QStringLiteral("/org/freedesktop/UDisks2/block_devices/")
+               + QFileInfo(devNode).fileName();
+    }
+
+    void PartitionManager::udisksUnmount(const QString &objectPath) {
+        QDBusInterface fs(QStringLiteral("org.freedesktop.UDisks2"), objectPath,
+                          QStringLiteral("org.freedesktop.UDisks2.Filesystem"),
+                          QDBusConnection::systemBus());
+        QVariantMap opts;
+        opts[QStringLiteral("force")] = true;
+        fs.call(QStringLiteral("Unmount"), opts); // errors are non-fatal (may not be mounted)
+    }
+
+    bool PartitionManager::udisksFormat(const QString &objectPath, const QString &type,
+                                        const QVariantMap &opts)
+    {
+        QDBusInterface block(QStringLiteral("org.freedesktop.UDisks2"), objectPath,
+                             QStringLiteral("org.freedesktop.UDisks2.Block"),
+                             QDBusConnection::systemBus());
+        block.setTimeout(300000); // 5 minutes for slow devices
+        QDBusReply<void> reply = block.call(QStringLiteral("Format"), type, opts);
+        if (!reply.isValid()) {
+            qWarning() << "Block.Format(" << type << ") failed on" << objectPath
+                       << ":" << reply.error().message();
+            return false;
         }
-        return proc.exitCode();
+        return true;
+    }
+
+    // Returns the device node (/dev/sdbN) of the newly created partition, or "".
+    QString PartitionManager::udisksCreatePartition(const QString &tableObjectPath,
+                                                    quint64 offset, quint64 size,
+                                                    const QString &type, const QString &name)
+    {
+        QDBusInterface pt(QStringLiteral("org.freedesktop.UDisks2"), tableObjectPath,
+                          QStringLiteral("org.freedesktop.UDisks2.PartitionTable"),
+                          QDBusConnection::systemBus());
+        pt.setTimeout(60000);
+        QDBusReply<QDBusObjectPath> reply =
+            pt.call(QStringLiteral("CreatePartition"),
+                    offset, size, type, name, QVariantMap());
+        if (!reply.isValid()) {
+            qWarning() << "CreatePartition failed on" << tableObjectPath
+                       << ":" << reply.error().message();
+            return {};
+        }
+        // Read the Block.Device property to get the canonical /dev/sdbN path.
+        const QString partObjectPath = reply.value().path();
+        QDBusInterface blk(QStringLiteral("org.freedesktop.UDisks2"), partObjectPath,
+                           QStringLiteral("org.freedesktop.UDisks2.Block"),
+                           QDBusConnection::systemBus());
+        QByteArray dev = blk.property("Device").toByteArray();
+        return dev.isEmpty() ? QString() : QString::fromUtf8(dev);
+    }
+
+    quint64 PartitionManager::udisksDeviceSize(const QString &objectPath) {
+        QDBusInterface block(QStringLiteral("org.freedesktop.UDisks2"), objectPath,
+                             QStringLiteral("org.freedesktop.UDisks2.Block"),
+                             QDBusConnection::systemBus());
+        return block.property("Size").toULongLong();
+    }
+
+    // Returns offset + size of a partition (= start of the next partition).
+    quint64 PartitionManager::udisksPartitionEnd(const QString &partObjectPath) {
+        QDBusInterface part(QStringLiteral("org.freedesktop.UDisks2"), partObjectPath,
+                            QStringLiteral("org.freedesktop.UDisks2.Partition"),
+                            QDBusConnection::systemBus());
+        const quint64 offset = part.property("Offset").toULongLong();
+        const quint64 size   = part.property("Size").toULongLong();
+        return offset + size;
     }
 
 } // namespace RufusLinux

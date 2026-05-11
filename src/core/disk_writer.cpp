@@ -11,14 +11,16 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QDebug>
-#include <QTemporaryDir>
 #include <QRegularExpression>
+#include <QCoreApplication>
+#include <QDBusConnection>
+#include <QDBusInterface>
+#include <QDBusReply>
+#include <QDBusObjectPath>
+#include <QDBusUnixFileDescriptor>
 
 #include <fcntl.h>
 #include <unistd.h>
-#include <sys/mount.h>
-#include <sys/ioctl.h>
-#include <linux/fs.h>
 #include <cstring>
 #include <cerrno>
 
@@ -53,10 +55,13 @@ namespace RufusLinux {
         lseek(srcFd, 0, SEEK_SET);
         if (isoSize <= 0) { ::close(srcFd); emit errorOccurred(tr("Cannot determine ISO size")); return false; }
 
-        int dstFd = ::open(config.deviceNode.toUtf8().constData(), O_WRONLY | O_SYNC);
+        emit progressChanged(1, tr("Requesting write access via UDisks2..."));
+        const int dstFd = udisksOpenForRestore(udisksPath(config.deviceNode));
         if (dstFd < 0) {
             ::close(srcFd);
-            emit errorOccurred(tr("Cannot open device %1: %2").arg(config.deviceNode, strerror(errno)));
+            emit errorOccurred(tr("Cannot open device %1 for writing. "
+                                  "Make sure the drive is not in use and authentication succeeded.")
+                               .arg(config.deviceNode));
             return false;
         }
 
@@ -121,15 +126,9 @@ namespace RufusLinux {
 
         if (m_cancelled.load()) return false;
 
-        QTemporaryDir tmpMount;
-        if (!tmpMount.isValid()) {
-            emit errorOccurred(tr("Cannot create temporary mount point.")); return false;
-        }
-
-        // Montar ISO (siempre read-only)
-        QString isoMount = tmpMount.path() + "/iso";
-        QDir().mkpath(isoMount);
-        if (!mountPartition(config.isoPath, isoMount)) {
+        // Montar ISO (read-only) vía UDisks2 loop device
+        QString isoMount = mountPartition(config.isoPath);
+        if (isoMount.isEmpty()) {
             emit errorOccurred(tr("Cannot mount ISO.")); return false;
         }
 
@@ -144,9 +143,8 @@ namespace RufusLinux {
             // the 4 GB FAT32 file-size limit, wimlib-imagex splits it into .swm
             // chunks that the Windows installer reassembles automatically.
 
-            QString fatMount = tmpMount.path() + "/fat";
-            QDir().mkpath(fatMount);
-            if (!mountPartition(partitions.at(0), fatMount)) {
+            QString fatMount = mountPartition(partitions.at(0));
+            if (fatMount.isEmpty()) {
                 unmountPartition(isoMount);
                 emit errorOccurred(tr("Failed to mount FAT32 partition.")); return false;
             }
@@ -212,10 +210,8 @@ namespace RufusLinux {
         } else {
             // ── Partición única o dual no-Windows ──────────────────────────────
             QString dataPartition  = dualPartition ? partitions.at(1) : partitions.at(0);
-            QString dataMountPoint = tmpMount.path() + "/data";
-            QDir().mkpath(dataMountPoint);
-
-            if (!mountPartition(dataPartition, dataMountPoint)) {
+            QString dataMountPoint = mountPartition(dataPartition);
+            if (dataMountPoint.isEmpty()) {
                 unmountPartition(isoMount);
                 emit errorOccurred(tr("Failed to mount data partition %1").arg(dataPartition));
                 return false;
@@ -297,12 +293,10 @@ namespace RufusLinux {
             // Para dual no-Windows: copiar EFI/ a la partición FAT32
             if (dualPartition) {
                 emit progressChanged(76, tr("Setting up EFI/boot partition..."));
-                QString efiMountPoint = tmpMount.path() + "/efi";
-                QDir().mkpath(efiMountPoint);
-                if (mountPartition(partitions.at(0), efiMountPoint)) {
-                    QString isoMount2 = tmpMount.path() + "/iso2";
-                    QDir().mkpath(isoMount2);
-                    if (mountPartition(config.isoPath, isoMount2)) {
+                QString efiMountPoint = mountPartition(partitions.at(0));
+                if (!efiMountPoint.isEmpty()) {
+                    QString isoMount2 = mountPartition(config.isoPath);
+                    if (!isoMount2.isEmpty()) {
                         if (QDir(isoMount2 + "/efi").exists() || QDir(isoMount2 + "/EFI").exists()) {
                             QProcess cpEfi;
                             cpEfi.setProgram("bash");
@@ -327,14 +321,18 @@ namespace RufusLinux {
         connect(&bl, &Bootloader::progressChanged, this, &DiskWriter::progressChanged);
         connect(&bl, &Bootloader::errorOccurred,   this, &DiskWriter::errorOccurred);
 
+        const QString blMountDir = QDir::tempPath()
+            + QStringLiteral("/lufus_bl_%1").arg(QCoreApplication::applicationPid());
+        QDir().mkpath(blMountDir);
         bool blOk = bl.install(
             config.deviceNode,
             partitions.at(0),
-            tmpMount.path() + "/bl_mount",
+            blMountDir,
             analysis,
             partConfig.scheme,
             partConfig.target
         );
+        QDir().rmdir(blMountDir);
 
         if (!blOk)
             qWarning() << "Bootloader installation had warnings";
@@ -348,69 +346,126 @@ namespace RufusLinux {
     }
 
     // ──────────────────────────────────────────────
-    // Helpers
+    // UDisks2-backed mount / unmount / open helpers
     // ──────────────────────────────────────────────
-    bool DiskWriter::mountPartition(const QString &partNode, const QString &mountPoint) {
-        if (!partNode.endsWith(".iso", Qt::CaseInsensitive)) {
-            // Regular block device: straight mount.
-            QProcess proc;
-            proc.setProgram("mount");
-            proc.setArguments({partNode, mountPoint});
-            proc.start();
-            if (!proc.waitForFinished(15000) || proc.exitCode() != 0) {
-                qWarning() << "mount failed:" << proc.readAllStandardError();
-                return false;
+
+    // /dev/sdb1 → /org/freedesktop/UDisks2/block_devices/sdb1
+    QString DiskWriter::udisksPath(const QString &devNode) {
+        return QStringLiteral("/org/freedesktop/UDisks2/block_devices/")
+               + QFileInfo(devNode).fileName();
+    }
+
+    // Mount a block partition or ISO file via UDisks2.
+    // For ISO files: creates a read-only loop device via Manager.LoopSetup,
+    // then mounts it via Filesystem.Mount.
+    // Returns the mount path assigned by UDisks2, or "" on failure.
+    QString DiskWriter::mountPartition(const QString &partNodeOrIso) {
+        const bool isIso = partNodeOrIso.endsWith(".iso", Qt::CaseInsensitive);
+        QString objectPath;
+
+        if (isIso) {
+            // Open the ISO file and pass the fd to UDisks2 to create a loop device.
+            QFile isoFile(partNodeOrIso);
+            if (!isoFile.open(QIODevice::ReadOnly)) {
+                qWarning() << "mountPartition: cannot open ISO" << partNodeOrIso;
+                return {};
             }
-            return true;
+            QDBusUnixFileDescriptor ufd(isoFile.handle());
+            QVariantMap loopOpts;
+            loopOpts[QStringLiteral("read-only")] = true;
+
+            QDBusInterface mgr(QStringLiteral("org.freedesktop.UDisks2"),
+                               QStringLiteral("/org/freedesktop/UDisks2"),
+                               QStringLiteral("org.freedesktop.UDisks2.Manager"),
+                               QDBusConnection::systemBus());
+            QDBusReply<QDBusObjectPath> loopReply =
+                mgr.call(QStringLiteral("LoopSetup"), QVariant::fromValue(ufd), loopOpts);
+            if (!loopReply.isValid()) {
+                qWarning() << "LoopSetup failed:" << loopReply.error().message();
+                return {};
+            }
+            objectPath = loopReply.value().path();
+            m_activeLoops.insert(objectPath);
+        } else {
+            objectPath = udisksPath(partNodeOrIso);
         }
 
-        // ISO file: Windows 10/11 ISOs use UDF 2.5 as primary filesystem.
-        // Mounting without -t picks ISO 9660 (the stub), which only exposes a
-        // handful of boot files — the full installer tree lives in UDF only.
-        // Try UDF first; fall back to auto-detect (ISO 9660 / Joliet).
-        auto tryMount = [&](const QStringList &args) -> bool {
-            QProcess p;
-            p.setProgram("mount");
-            p.setArguments(args);
-            p.start();
-            bool ok = p.waitForFinished(15000) && p.exitCode() == 0;
-            if (!ok)
-                qDebug() << "mount attempt failed:" << p.readAllStandardError().trimmed();
-            return ok;
-        };
+        QDBusInterface fs(QStringLiteral("org.freedesktop.UDisks2"),
+                          objectPath,
+                          QStringLiteral("org.freedesktop.UDisks2.Filesystem"),
+                          QDBusConnection::systemBus());
+        QDBusReply<QString> mountReply = fs.call(QStringLiteral("Mount"), QVariantMap());
+        if (!mountReply.isValid()) {
+            qWarning() << "Filesystem.Mount failed for" << objectPath
+                       << ":" << mountReply.error().message();
+            if (m_activeLoops.contains(objectPath)) {
+                QDBusInterface loop(QStringLiteral("org.freedesktop.UDisks2"), objectPath,
+                                    QStringLiteral("org.freedesktop.UDisks2.Loop"),
+                                    QDBusConnection::systemBus());
+                loop.call(QStringLiteral("Delete"), QVariantMap());
+                m_activeLoops.remove(objectPath);
+            }
+            return {};
+        }
 
-        if (tryMount({"-t", "udf", "-o", "loop,ro", partNode, mountPoint}))
-            return true;
-
-        // Some older ISOs are Joliet/ISO 9660 only; let the kernel decide.
-        if (tryMount({"-o", "loop,ro", partNode, mountPoint}))
-            return true;
-
-        qWarning() << "mountPartition: all mount attempts failed for" << partNode;
-        return false;
+        const QString mountPath = mountReply.value();
+        m_mountToObject[mountPath] = objectPath;
+        return mountPath;
     }
 
-    bool DiskWriter::unmountPartition(const QString &mountPoint) {
-        // Aseguramos que el punto de montaje existe antes de intentar umount
-        if (!QDir(mountPoint).exists()) return true;
-        QProcess proc;
-        proc.setProgram("umount");
-        proc.setArguments({mountPoint});
-        proc.start();
-        return proc.waitForFinished(10000) && proc.exitCode() == 0;
+    // Unmount via UDisks2. Tears down the associated loop device if one was created.
+    bool DiskWriter::unmountPartition(const QString &mountPath) {
+        if (mountPath.isEmpty()) return true;
+
+        const QString objectPath = m_mountToObject.value(mountPath);
+        if (objectPath.isEmpty()) {
+            qWarning() << "unmountPartition: no object path for" << mountPath;
+            return false;
+        }
+
+        QDBusInterface fs(QStringLiteral("org.freedesktop.UDisks2"),
+                          objectPath,
+                          QStringLiteral("org.freedesktop.UDisks2.Filesystem"),
+                          QDBusConnection::systemBus());
+        QVariantMap opts;
+        opts[QStringLiteral("force")] = true;
+        QDBusReply<void> umountReply = fs.call(QStringLiteral("Unmount"), opts);
+        if (!umountReply.isValid())
+            qWarning() << "Filesystem.Unmount failed for" << objectPath
+                       << ":" << umountReply.error().message();
+
+        if (m_activeLoops.contains(objectPath)) {
+            QDBusInterface loop(QStringLiteral("org.freedesktop.UDisks2"), objectPath,
+                                QStringLiteral("org.freedesktop.UDisks2.Loop"),
+                                QDBusConnection::systemBus());
+            loop.call(QStringLiteral("Delete"), QVariantMap());
+            m_activeLoops.remove(objectPath);
+        }
+
+        m_mountToObject.remove(mountPath);
+        return umountReply.isValid();
     }
 
-    bool DiskWriter::syncDevice(const QString &deviceNode) {
-        QProcess flush;
-        flush.setProgram("blockdev");
-        flush.setArguments({"--flushbufs", deviceNode});
-        flush.start();
-        flush.waitForFinished(10000);
+    // Request a write file descriptor from UDisks2 (Polkit auth happens here).
+    // Returns a dup()'d fd owned by the caller, or -1 on failure.
+    int DiskWriter::udisksOpenForRestore(const QString &objectPath) {
+        QDBusInterface block(QStringLiteral("org.freedesktop.UDisks2"),
+                             objectPath,
+                             QStringLiteral("org.freedesktop.UDisks2.Block"),
+                             QDBusConnection::systemBus());
+        block.setTimeout(60000);
+        QDBusReply<QDBusUnixFileDescriptor> reply =
+            block.call(QStringLiteral("OpenForRestore"), QVariantMap());
+        if (!reply.isValid()) {
+            qWarning() << "OpenForRestore failed:" << reply.error().message();
+            return -1;
+        }
+        // dup() because QDBusUnixFileDescriptor closes the fd on destruction.
+        return ::dup(reply.value().fileDescriptor());
+    }
 
-        QProcess proc;
-        proc.setProgram("sync");
-        proc.start();
-        return proc.waitForFinished(60000);
+    void DiskWriter::syncDevice(const QString &/*deviceNode*/) {
+        ::sync();
     }
 
     // ──────────────────────────────────────────────

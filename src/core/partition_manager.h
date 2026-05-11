@@ -12,6 +12,7 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QVariantMap>
 
 #include <cstdint>
 
@@ -111,7 +112,20 @@ signals:
     void errorOccurred(const QString &message);
 
 private:
-    int runCommand(const QString &program, const QStringList &args, int timeoutMs = 30000);
+    // UDisks2 helpers — all operations requiring root go through these.
+    static QString udisksBlockPath(const QString &devNode);
+    void udisksUnmount(const QString &objectPath);
+    bool udisksFormat(const QString &objectPath, const QString &type,
+                      const QVariantMap &opts = QVariantMap());
+    // Creates a partition on an existing table; returns the new partition's device node
+    // (e.g. "/dev/sdb1") or "" on failure.
+    QString udisksCreatePartition(const QString &tableObjectPath,
+                                  quint64 offset, quint64 size,
+                                  const QString &type, const QString &name);
+    quint64 udisksDeviceSize(const QString &objectPath);
+    // Returns offset+size of a created partition (to compute the next partition's offset).
+    quint64 udisksPartitionEnd(const QString &partObjectPath);
+
     bool partitionMBR(const QString &deviceNode, const PartitionConfig &config,
                       bool dualPartition, uint64_t espSizeMB);
     bool partitionGPT(const QString &deviceNode, const PartitionConfig &config,

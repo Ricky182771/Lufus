@@ -25,10 +25,7 @@ finish-args:
   # Temporary JSON config file written before launching the backend helper
   - --filesystem=/tmp
 
-  # Polkit for privilege escalation (disk write via pkexec)
-  - --system-talk-name=org.freedesktop.PolicyKit1
-
-  # UDisks2 for device monitoring and enumeration
+  # UDisks2 manages all privileged disk operations and handles Polkit auth internally.
   - --system-talk-name=org.freedesktop.UDisks2
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -67,12 +64,8 @@ modules:
 # Notes for Flathub submission
 # ──────────────────────────────────────────────────────────────────────────────
 # 1. Replace `type: dir` with a tagged git commit or release tarball + sha256.
-# 2. The pkexec-based privilege escalation does not work inside the Flatpak
-#    sandbox by default. Options:
-#      a) Ship a D-Bus system service (helper) installed via a separate package.
-#      b) Migrate the write backend to use the UDisks2 D-Bus API so that the
-#         sandbox can request block device operations through the portal.
-# 3. The polkit policy (polkit/io.github.lufus.Lufus.policy) is installed to
-#    /app/share/polkit-1/actions/ but the host polkit daemon reads from
-#    /usr/share/polkit-1/actions/. For production, distribute the policy via
-#    the package manager or a companion system package.
+# 2. Privileged disk operations are fully delegated to UDisks2 via D-Bus.
+#    No pkexec or helper process is needed. Authentication dialogs come from
+#    UDisks2's own Polkit actions (org.freedesktop.udisks2.*).
+# 3. The polkit policy in /app/share/polkit-1/actions/ is retained for
+#    documentation but is not required for runtime operation.
