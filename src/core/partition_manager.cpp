@@ -167,14 +167,33 @@ namespace RufusLinux {
     // ──────────────────────────────────────────────
     // Format
     // ──────────────────────────────────────────────
+    // FAT32 label constraints (MS-DOS/ECMA-107):
+    //   - max 11 chars, uppercase only
+    //   - forbidden: " * + , . / : ; < = > ? [ \ ] | and control chars (0x00-0x1F, 0x7F)
+    static QString sanitizeFat32Label(const QString &raw) {
+        static const QString forbidden = QStringLiteral("\"*+,./:;<=>?[\\]|");
+        QString out;
+        out.reserve(11);
+        for (QChar c : raw.toUpper()) {
+            if (out.size() == 11) break;
+            ushort v = c.unicode();
+            if (v < 0x20 || v == 0x7F) continue;
+            if (forbidden.contains(c))  continue;
+            out += c;
+        }
+        // Trim trailing spaces (MS spec: labels are right-padded with spaces internally)
+        while (!out.isEmpty() && out.back() == QLatin1Char(' '))
+            out.chop(1);
+        return out.isEmpty() ? QStringLiteral("LUFUS") : out;
+    }
+
     bool PartitionManager::formatPartition(const QString &partNode, FileSystem fs,
                                            const QString &label, uint32_t /*clusterSize*/)
     {
         emit progressChanged(40, tr("Formatting %1...").arg(partNode));
 
         auto truncLabel = [&](int maxLen) -> QString {
-            QString s = label.left(maxLen);
-            return s;
+            return label.left(maxLen);
         };
 
         QString type;
@@ -183,7 +202,7 @@ namespace RufusLinux {
         switch (fs) {
             case FileSystem::FAT32:
                 type = QStringLiteral("vfat");
-                opts[QStringLiteral("label")] = truncLabel(11).toUpper().trimmed();
+                opts[QStringLiteral("label")] = sanitizeFat32Label(label);
                 break;
             case FileSystem::NTFS:
                 type = QStringLiteral("ntfs");
@@ -235,7 +254,7 @@ namespace RufusLinux {
                                QStringLiteral("org.freedesktop.UDisks2.Block"),
                                QDBusConnection::systemBus());
             QByteArray dev = blk.property("Device").toByteArray();
-            return dev.isEmpty() ? node : QString::fromUtf8(dev);
+            return dev.isEmpty() ? node : QString::fromUtf8(dev.constData());
         };
 
         QStringList result;
@@ -351,7 +370,7 @@ namespace RufusLinux {
                            QStringLiteral("org.freedesktop.UDisks2.Block"),
                            QDBusConnection::systemBus());
         QByteArray dev = blk.property("Device").toByteArray();
-        return dev.isEmpty() ? QString() : QString::fromUtf8(dev);
+        return dev.isEmpty() ? QString() : QString::fromUtf8(dev.constData());
     }
 
     quint64 PartitionManager::udisksDeviceSize(const QString &objectPath) {
