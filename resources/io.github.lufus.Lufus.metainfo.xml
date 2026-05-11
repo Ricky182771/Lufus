@@ -65,7 +65,7 @@
 
   <screenshots>
     <screenshot type="default">
-      <caption>Main window showing device and boot selection options</caption>
+      <caption>Main window with device and boot options</caption>
       <image type="source">https://raw.githubusercontent.com/Ricky182771/Lufus/main/packaging/screenshot.png</image>
     </screenshot>
   </screenshots>
