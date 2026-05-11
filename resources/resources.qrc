@@ -1,8 +1,8 @@
 <!DOCTYPE RCC>
 <RCC version="1.0">
     <qresource prefix="/">
-        <file>icons/down-triangle.png</file>
-        <file>icons/refresh.png</file>
+        <file>icons/down-triangle.svg</file>
+        <file>icons/refresh.svg</file>
         <file>icons/lufus.svg</file>
     </qresource>
 </RCC>

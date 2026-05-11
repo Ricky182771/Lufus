@@ -75,7 +75,7 @@ void MainWindow::setupUI() {
     m_deviceCombo = new QComboBox(this);
     m_deviceCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_refreshBtn = new QPushButton(this);
-    m_refreshBtn->setIcon(QIcon(":/icons/refresh.png"));
+    m_refreshBtn->setIcon(QIcon(":/icons/refresh.svg"));
     m_refreshBtn->setFixedWidth(36);
     m_refreshBtn->setToolTip(tr("Refresh device list"));
     m_showHardDrives = new QCheckBox(tr("List USB Hard Drives"), this);
@@ -298,7 +298,7 @@ void MainWindow::applyStyleSheet() {
             border-left: 1px solid #555;
         }
         QComboBox::down-arrow {
-            image: url(:/icons/down-triangle.png);
+            image: url(:/icons/down-triangle.svg);
             width: 10px; height: 6px;
         }
         QComboBox QAbstractItemView {
