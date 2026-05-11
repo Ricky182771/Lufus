@@ -129,9 +129,25 @@ endif()
 # ──────────────────────────────────────────────
 # Install
 # ──────────────────────────────────────────────
-install(TARGETS Lufus DESTINATION bin)
-install(FILES resources/io.github.lufus.Lufus.desktop DESTINATION share/applications)
+include(GNUInstallDirs)
+
+install(TARGETS Lufus
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
 install(FILES resources/icons/lufus.svg
-        DESTINATION share/icons/hicolor/scalable/apps
-        RENAME io.github.lufus.Lufus.svg)
-install(FILES polkit/io.github.lufus.Lufus.policy DESTINATION share/polkit-1/actions)
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps
+    RENAME io.github.lufus.Lufus.svg
+)
+
+install(FILES resources/io.github.lufus.Lufus.desktop
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/applications
+)
+
+install(FILES resources/io.github.lufus.Lufus.metainfo.xml
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo
+)
+
+install(FILES polkit/io.github.lufus.Lufus.policy
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/polkit-1/actions
+)

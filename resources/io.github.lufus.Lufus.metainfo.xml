@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.lufus.Lufus</id>
+
+  <name>Lufus</name>
+  <summary>Bootable USB creator for Linux</summary>
+
+  <description>
+    <p>
+      Lufus is a native Linux application for creating bootable USB drives
+      from Windows and Linux ISO images. It was developed as a functional
+      port of the Rufus utility originally built for Windows.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Windows 10 and Windows 11 ISO support</li>
+      <li>Linux ISO support</li>
+      <li>UEFI and legacy BIOS compatibility</li>
+      <li>Secure Boot support</li>
+      <li>Automatic install.wim splitting for FAT32 and Windows 11 compatibility</li>
+      <li>GPT partition scheme with correct Microsoft basic data partition type</li>
+      <li>Clean Qt6 interface</li>
+    </ul>
+  </description>
+
+  <launcherentry>io.github.lufus.Lufus.desktop</launcherentry>
+
+  <url type="homepage">https://github.com/Ricky182771/Lufus</url>
+  <url type="bugtracker">https://github.com/Ricky182771/Lufus/issues</url>
+
+  <metadata_license>MIT</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+
+  <developer id="io.github.ricky182771">
+    <name>Ricky182771</name>
+  </developer>
+
+  <provides>
+    <binary>Lufus</binary>
+  </provides>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+
+  <recommends>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </recommends>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="1.0.0" date="2026-05-10">
+      <description>
+        <p>Initial release.</p>
+        <ul>
+          <li>Bootable USB creation from Windows and Linux ISO images</li>
+          <li>Windows 11 support with automatic install.wim splitting</li>
+          <li>UEFI, legacy BIOS, and Secure Boot compatibility</li>
+        </ul>
+      </description>
+    </release>
+  </releases>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>Main window showing device and boot selection options</caption>
+      <image type="source">https://raw.githubusercontent.com/Ricky182771/Lufus/main/packaging/screenshot.png</image>
+    </screenshot>
+  </screenshots>
+</component>
