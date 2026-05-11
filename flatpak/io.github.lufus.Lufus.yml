@@ -15,14 +15,22 @@ finish-args:
   - --socket=fallback-x11
 
   # USB and block device access — required for writing ISO images to drives.
-  # NOTE: This app uses pkexec for privilege escalation. For a fully sandboxed
-  # Flatpak, consider migrating to the UDisks2 D-Bus API instead of pkexec.
   - --device=all
+
+  # ISO file selection from the user's home directory
   - --filesystem=home
-  - --filesystem=/tmp
+
+  # UDisks2 loop mount paths
   - --filesystem=/run/media
   - --filesystem=/media
-  # UDisks2 manages all privileged disk operations and handles Polkit auth internally.
+
+  # Temporary files
+  - --filesystem=/tmp
+
+  # Polkit for privilege escalation
+  - --system-talk-name=org.freedesktop.PolicyKit1
+
+  # UDisks2 for device monitoring, enumeration, and writing
   - --system-talk-name=org.freedesktop.UDisks2
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -46,8 +54,7 @@ cleanup:
 # ──────────────────────────────────────────────────────────────────────────────
 modules:
 
-
-  # ── util-linux ──────────────────────────────────────────
+  # ── util-linux (libfdisk + libuuid) ──────────────────────────────────────
   - name: util-linux
     buildsystem: autotools
     config-opts:
@@ -75,23 +82,13 @@ modules:
       - type: archive
         url: https://wimlib.net/downloads/wimlib-1.14.4.tar.gz
         sha256: 3633db2b6c8b255eb86d3bf3df3059796bd1f08e50b8c9728c7eb66662e51300
+
   # ── Lufus ────────────────────────────────────────────────────────────────
   - name: lufus
     buildsystem: cmake-ninja
     config-opts:
       - -DCMAKE_BUILD_TYPE=Release
-    # For local development, build directly from the repo root.
-    # For Flathub submission, replace with a git/archive source + sha256.
     sources:
-      - type: dir
-        path: ..
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Notes for Flathub submission
-# ──────────────────────────────────────────────────────────────────────────────
-# 1. Replace `type: dir` with a tagged git commit or release tarball + sha256.
-# 2. Privileged disk operations are fully delegated to UDisks2 via D-Bus.
-#    No pkexec or helper process is needed. Authentication dialogs come from
-#    UDisks2's own Polkit actions (org.freedesktop.udisks2.*).
-# 3. The polkit policy in /app/share/polkit-1/actions/ is retained for
-#    documentation but is not required for runtime operation.
+      - type: archive
+        url: https://github.com/Ricky182771/Lufus/archive/refs/tags/v1.0.0.tar.gz
+        sha256: e5c4703e10b36cf4f30b6ed968f311aa99a952365632b9f6ea5ab8d14c1cba60
