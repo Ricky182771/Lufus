@@ -10,6 +10,9 @@
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QTimer>
+#include <QDBusConnection>
+#include <QDBusInterface>
+#include <QDBusObjectPath>
 
 #include <fcntl.h>
 #include <cstring>
@@ -259,6 +262,23 @@ UsbDevice DeviceManager::buildDeviceInfo(struct udev_device *dev) const {
     info.vendor = prop("ID_VENDOR").replace('_', ' ').trimmed();
     info.model  = prop("ID_MODEL").replace('_', ' ').trimmed();
     info.serial = prop("ID_SERIAL_SHORT").trimmed();
+
+    // Flatpak sandbox: udev properties are empty; fall back to UDisks2 Drive object.
+    if (info.vendor.isEmpty() && info.model.isEmpty()) {
+        const QString blockPath = QStringLiteral("/org/freedesktop/UDisks2/block_devices/")
+                                  + QFileInfo(info.deviceNode).fileName();
+        QDBusInterface block(QStringLiteral("org.freedesktop.UDisks2"), blockPath,
+                             QStringLiteral("org.freedesktop.UDisks2.Block"),
+                             QDBusConnection::systemBus());
+        const QDBusObjectPath drivePath = block.property("Drive").value<QDBusObjectPath>();
+        if (!drivePath.path().isEmpty() && drivePath.path() != QStringLiteral("/")) {
+            QDBusInterface drive(QStringLiteral("org.freedesktop.UDisks2"), drivePath.path(),
+                                 QStringLiteral("org.freedesktop.UDisks2.Drive"),
+                                 QDBusConnection::systemBus());
+            info.vendor = drive.property("Vendor").toString().trimmed();
+            info.model  = drive.property("Model").toString().trimmed();
+        }
+    }
 
     const char *rem = udev_device_get_sysattr_value(dev, "removable");
     info.isRemovable = (rem && strcmp(rem, "1") == 0);

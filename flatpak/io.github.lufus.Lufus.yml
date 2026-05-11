@@ -18,13 +18,10 @@ finish-args:
   # NOTE: This app uses pkexec for privilege escalation. For a fully sandboxed
   # Flatpak, consider migrating to the UDisks2 D-Bus API instead of pkexec.
   - --device=all
-
-  # ISO file selection from the user's home directory
   - --filesystem=home
-
-  # Temporary JSON config file written before launching the backend helper
   - --filesystem=/tmp
-
+  - --filesystem=/run/media
+  - --filesystem=/media
   # UDisks2 manages all privileged disk operations and handles Polkit auth internally.
   - --system-talk-name=org.freedesktop.UDisks2
 
